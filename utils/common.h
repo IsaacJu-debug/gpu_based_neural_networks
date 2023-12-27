@@ -1,58 +1,46 @@
-#ifndef UTILS_COMMON_H
-#define UTILS_COMMON_H
+#ifndef COMMON_H_
+#define COMMON_H_
 
-#include <armadillo>
 #include <cassert>
 #include <string>
 
-#define ASSERT_MAT_SAME_SIZE(mat1, mat12)  assert(mat1.n_rows == mat2.n_rows && mat1.n_cols == mat2.n_cols)
+using std::string;
 
-struct grads {
-    std::vector<arma::mat> dW;
-    std::vector<arma::colvec> db;
-};
+// #define USE_DOUBLE
 
-struct cache {
-    arma::mat X;
-    std::vector<arma::mat> z;
-    std::vector<arma::mat> a;
-    arma::mat yc;
-};
+extern string file_train_images;
+extern string file_train_labels;
+extern string file_test_images;
+extern string output_dir;
+extern string cpu_save_dir;
+extern string cpu_load_dir;
+extern string grade_tag;
+extern string mpi_tag;
+extern string file_test_dir;
 
-/*
- * Applies the sigmoid function to each element of the matrix
- * and returns a new matrix.
- */
-void sigmoid(const arma::mat& mat, arma::mat& mat2);
+#define IMAGE_SIZE 784 // 28 x 28
+#define NUM_CLASSES 10
+#define NUM_TRAIN 60000
+#define NUM_TEST 10000
 
-/*
- * ReLU activation
- */
-void relu(const arma::mat& mat, arma::mat& mat2);
+#ifndef USE_DOUBLE
 
-/*
- * Applies the softmax to each rowvec of the matrix
- */
-void softmax(const arma::mat& mat, arma::mat& mat2);
+typedef float nn_real;
+#define MPI_FP MPI_FLOAT
+#define cublas_gemm cublasSgemm
 
-/*
- * Performs gradient check by comparing numerical and analytical gradients.
- */
-bool gradcheck(struct grads& grads1, struct grads& grads2);
+#else
 
-/*
- * Compares the two label vectors to compute precision.
- */
-double precision(arma::rowvec vec1, arma::rowvec vec2);
+typedef double nn_real;
+#define MPI_FP MPI_DOUBLE
+#define cublas_gemm cublasDgemm
 
-/*
- * Converts label vector into a matrix of one-hot label vectors
- * @params label : label vector
- * @params C : Number of classes
- * @params [out] y : The y matrix.
- */
-void label_to_y(arma::rowvec label, int C, arma::mat& y);
+#endif
 
-void save_label(std::string filename, arma::rowvec& label);
+#define _MSG(msg)                                                      \
+  do                                                                   \
+  {                                                                    \
+    std::cerr << __FILE__ << "(@" << __LINE__ << "): " << msg << '\n'; \
+  } while (false)
 
 #endif

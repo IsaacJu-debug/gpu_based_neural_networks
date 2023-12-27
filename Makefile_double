@@ -22,8 +22,8 @@ OBJS := $(CPPOBJS) $(CUDOBJS) $(UTLOBJS)
 DEPFILES := $(OBJS:$(OBJDIR)/%.o=$(DEPDIR)/%.d)
 
 # Flags
-CFLAGS=-O2 -DARMA_USE_BLAS -DARMA_USE_LAPACK -DARMA_DONT_USE_WRAPPER
-CUDFLAGS=-lineinfo -O2 -c -arch=compute_75 -code=sm_75 -Xcompiler -Wall
+CFLAGS=-DUSE_DOUBLE -O2 -DARMA_USE_BLAS -DARMA_USE_LAPACK -DARMA_DONT_USE_WRAPPER
+CUDFLAGS=-DUSE_DOUBLE -lineinfo -O2 -c -arch=compute_75 -code=sm_75 -Xcompiler -Wall
 INCFLAGS=-I$(CUDA_INC)
 
 # LDFLAGS=-lblas -llapack -lcublas -lcudart
@@ -65,5 +65,6 @@ clean:
 clean_slurm:
 	rm -f slurm*
 
-clean_all: clean
+clean_all:
+	rm -rf $(OBJDIR)/*.o $(DEPDIR)/*.d main
 	rm -f Outputs/*

@@ -1,302 +1,480 @@
-#include <iostream>
-#include <cassert>
-#include <mpi.h>
-#include <armadillo>
 #include <cuda_runtime.h>
 #include <helper_cuda.h>
 #include <helper_functions.h>
+#include <mpi.h>
 #include <unistd.h>
 
-#include "utils/mnist.h"
-#include "neural_network.h"
-#include "utils/tests.h"
+#include <armadillo>
+#include <cassert>
+#include <chrono>
+#include <fstream>
+#include <iostream>
+
 #include "utils/common.h"
-#include "gpu_func.h"
+#include "utils/mnist.h"
+#include "utils/neural_network.h"
+#include "utils/tests.h"
 
-#define FILE_TRAIN_IMAGES "/data/train-images-idx3-ubyte"
-#define FILE_TRAIN_LABELS "/data/train-labels-idx1-ubyte"
-#define FILE_TEST_IMAGES "/data/t10k-images-idx3-ubyte"
-#define FILE_TEST_OUTPUT "Outputs/Pred_testset.txt"
-#define NUM_TRAIN 60000
-#define IMAGE_SIZE 784  // 28 x 28
-#define NUM_CLASSES 10
-#define NUM_TEST 10000
+// TODO: edit the following to choose which directory you wish
+// to store your CPU results in.
+string cpu_save_dir = "/home/darve/fp_output";
+// TODO: directory where the CPU results should be loaded from.
+string cpu_load_dir = "/home/darve/fp_output";
+// TODO: path to the MNIST file location.
+string file_train_images = "/home/darve/train-images.idx3-ubyte";
+string file_train_labels = "/home/darve/train-labels.idx1-ubyte";
+string file_test_images = "/home/darve/t10k-images.idx3-ubyte";
+string file_test_labels = "/home/darve/t10k-labels.idx1-ubyte";
 
-#define MPI_SAFE_CALL( call ) do {                               \
-    int err = call;                                              \
-    if (err != MPI_SUCCESS) {                                    \
-        fprintf(stderr, "MPI error %d in file '%s' at line %i",  \
-               err, __FILE__, __LINE__);                         \
-        exit(1);                                                 \
-    } } while(0)
+string output_dir = "Outputs";
 
-int main(int argc, char* argv[]) {
-    // Initialize MPI
-    int num_procs = 0, rank = 0;
-    MPI_Init(&argc, &argv);
-    MPI_SAFE_CALL(MPI_Comm_size(MPI_COMM_WORLD, &num_procs));
-    MPI_SAFE_CALL(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+string grade_tag;
+string mpi_tag;
 
-    // Assign a GPU device to each MPI proc
-    int nDevices;
-    cudaGetDeviceCount(&nDevices);
+#define MPI_SAFE_CALL(call)                                                  \
+  do                                                                         \
+  {                                                                          \
+    int err = call;                                                          \
+    if (err != MPI_SUCCESS)                                                  \
+    {                                                                        \
+      fprintf(stderr, "MPI error %d in file '%s' at line %i", err, __FILE__, \
+              __LINE__);                                                     \
+      exit(1);                                                               \
+    }                                                                        \
+  } while (0)
 
-    if(nDevices < num_procs) {
-        std::cerr << "Please allocate at least as many GPUs as\
-		 the number of MPI procs." << std::endl;
+int main(int argc, char *argv[])
+{
+  // Initialize MPI
+  int num_procs = 0, rank = 0;
+  MPI_Init(&argc, &argv);
+  MPI_SAFE_CALL(MPI_Comm_size(MPI_COMM_WORLD, &num_procs));
+  MPI_SAFE_CALL(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+
+  mpi_tag = std::string("-") + std::to_string(num_procs);
+
+  // Assign a GPU device to each MPI proc
+  int nDevices;
+  cudaGetDeviceCount(&nDevices);
+
+  if (nDevices < num_procs && rank == 0)
+  {
+    std::cerr << "Please allocate at least as many GPUs as the number of MPI procs.\n";
+    std::cerr << "Number of processes: " << num_procs << std::endl;
+    std::cerr << "Number of GPUs: " << nDevices << std::endl;
+    exit(1);
+  }
+
+  checkCudaErrors(cudaSetDevice(rank));
+
+  if (rank == 0)
+  {
+    printf("Number of MPI processes         %1d\n", num_procs);
+    printf("Number of CUDA devices          %1d\n", nDevices);
+  }
+
+  // Read in command line arguments
+  std::vector<int> H(3);
+  nn_real reg = 1e-4;
+  nn_real learning_rate = 0.001;
+  int num_epochs = 1;
+  int batch_size = 32;
+  int num_neuron = 32;
+  int run_seq = 0;
+  int debug = 0;
+  int grade = 0;
+  int print_every = 0;
+
+  int option = 0;
+
+  while ((option = getopt(argc, argv, "n:r:l:e:b:g:p:sd")) != -1)
+  {
+    switch (option)
+    {
+    case 'n': // number of neurons
+      num_neuron = atoi(optarg);
+      break;
+
+    case 'r': // regularization factor
+      reg = atof(optarg);
+      break;
+
+    case 'l': // learning rate
+      learning_rate = atof(optarg);
+      break;
+
+    case 'e': // number of epochs
+      num_epochs = atoi(optarg);
+      break;
+
+    case 'b': // batch size
+      batch_size = atoi(optarg);
+      break;
+
+    case 'g':
+      // grading mode
+      // We write to files NNErrors*.txt and calculate the error
+      // only if g in {1,2,3}.
+      grade = atoi(optarg);
+      break;
+
+    case 'p': // frequency for saving NN coefficients
+      print_every = atoi(optarg);
+      break;
+
+    case 's': // run the sequential code
+      run_seq = 1;
+      break;
+
+    case 'd':
+      // calculate the GPU calculation error.
+      // this option assumes that the result from the CPU run
+      // has been saved in a file.
+      debug = 1;
+      break;
     }
+  }
 
-    checkCudaErrors(cudaSetDevice(rank));
+  /* This option is going to be used to test correctness.
+     DO NOT change the following parameters */
+  switch (grade)
+  {
+  case 0: // No grading
+    break;
 
-    if(rank == 0) {
-        std::cout << "Number of MPI processes = " << num_procs << std::endl;
-        std::cout << "Number of CUDA devices = " << nDevices << std::endl;
-    }
+  case 1: // Low lr, high iters
+    learning_rate = 0.0005;
+    num_epochs = 40;
+    reg = 1e-4;
+    batch_size = 800;
+    num_neuron = 1000;
+    break;
 
-    // Read in command line arguments
-    std::vector<int> H(3);
-    double reg = 1e-4;
-    double learning_rate = 0.001;
-    int num_epochs = 20;
-    int batch_size = 800;
-    int num_neuron = 1000;
-    int run_seq = 0;
-    int debug = 0;
-    int grade = 0;
-    int print_every = 0;
+  case 2: // Medium lr, medium iters
+    learning_rate = 0.001;
+    num_epochs = 10;
+    reg = 1e-4;
+    batch_size = 800;
+    num_neuron = 1000;
+    break;
 
-    int option = 0;
-    char *str_end;
+  case 3: // High lr, very few iters
+    learning_rate = 0.002;
+    num_epochs = 1;
+    reg = 1e-4;
+    batch_size = 800;
+    num_neuron = 1000;
+    break;
 
-    while((option = getopt(argc, argv, "n:r:l:e:b:g:p:sd")) != -1) {
-        switch(option) {
-        case 'n':
-            if ((num_neuron = strtol(optarg, &str_end, 10)) <= 0 ||
-                *str_end != '\0') {
-                fprintf (stderr,
-                         "Option -n takes a positive integer.\n");
-                exit(1);
-            }
-            break;
+  case 4:
+    break;
+  }
 
-        case 'r':
-            if ((reg = strtof(optarg, &str_end)) <= 0 ||
-                *str_end != '\0') {
-                fprintf (stderr,
-                         "Option -r takes a positive floating point number.\n");
-                exit(1);
-            }
-            break;
-
-        case 'l':
-            if ((learning_rate = strtof(optarg, &str_end)) <= 0 ||
-                *str_end != '\0') {
-                fprintf (stderr,
-                         "Option -l takes a positive floating point number.\n");
-                exit(1);
-            }
-            break;
-
-        case 'e':
-            if ((num_epochs = strtol(optarg, &str_end, 10)) <= 0 ||
-                *str_end != '\0') {
-                fprintf (stderr,
-                         "Option -e takes a positive integer.\n");
-                exit(1);
-            }
-            break;
-
-        case 'b':
-            if ((batch_size = strtol(optarg, &str_end, 10)) <= 0 ||
-                *str_end != '\0') {
-                fprintf (stderr,
-                         "Option -b takes a positive integer.\n");
-                exit(1);
-            }
-            break;
-
-        case 'g':
-            grade = atoi(optarg);
-            break;
-
-        case 'p':
-            print_every = atoi(optarg);
-            break;
-
-        case 's':
-            run_seq = 1;
-            break;
-
-        case 'd':
-            debug = 1;
-            break;
-
-        case '?':
-            exit(1);
-        }
-    }
-
-    /* This option is going to be used to test correctness.
-       DO NOT change the following parameters */
-    switch(grade) {
-    case 0:  // No grading
-        break;
-
-    case 1:  // Low lr, high iters
-        reg = 1e-4;
-        learning_rate = 0.001;
-        num_epochs = 40;
-        batch_size = 800;
-        num_neuron = 100;
-        run_seq = 1;
-        debug = 1;
-        print_every = 0;
-        break;
-
-    case 2:  // Medium lr, medium iters
-        reg = 1e-4;
-        learning_rate = 0.01;
-        num_epochs = 10;
-        batch_size = 800;
-        num_neuron = 100;
-        run_seq = 1;
-        debug = 1;
-        print_every = 0;
-        break;
-
-    case 3:  // High lr, very few iters
-        reg = 1e-4;
-        learning_rate = 0.025;
-        num_epochs = 1;
-        batch_size = 800;
-        num_neuron = 100;
-        run_seq = 1;
-        debug = 1;
-        print_every = 1;
-        break;
-
-    case 4:
-        break;
-    }
-
-    if(grade == 4) {
-        if(rank == 0) {
-            BenchmarkGEMM();
-        }
-
-        MPI_Finalize();
-        return 0;
-    }
-
-    H[0] = IMAGE_SIZE;
-    H[1] = num_neuron;
-    H[2] = NUM_CLASSES;
-
-    arma::mat x_train, y_train, label_train, x_dev, y_dev, label_dev, x_test;
-    NeuralNetwork nn(H);
-
-    if(rank == 0) {
-        std::cout << "num_neuron=" << num_neuron << ", reg=" << reg <<
-                  ", learning_rate=" << learning_rate
-                  << ", num_epochs=" << num_epochs << ", batch_size=" << batch_size << std::endl;
-        // Read MNIST images into Armadillo mat vector
-        arma::mat x(IMAGE_SIZE, NUM_TRAIN);
-        // label contains the prediction for each
-        arma::rowvec label = arma::zeros<arma::rowvec>(NUM_TRAIN);
-        // y is the matrix of one-hot label vectors where only y[c] = 1,
-        // where c is the right class.
-        arma::mat y = arma::zeros<arma::mat>(NUM_CLASSES, NUM_TRAIN);
-
-        std::cout << "Loading training data..." << std::endl;
-        read_mnist(FILE_TRAIN_IMAGES, x);
-        read_mnist_label(FILE_TRAIN_LABELS, label);
-        label_to_y(label, NUM_CLASSES, y);
-
-        /* Print stats of training data */
-        std::cout << "Training data stats..." << std::endl;
-        std::cout << "Size of x_train, N =  " << x.n_cols << std::endl;
-        std::cout << "Size of label_train = " << label.size() << std::endl;
-
-        assert(x.n_cols == NUM_TRAIN && x.n_rows == IMAGE_SIZE);
-        assert(label.size() == NUM_TRAIN);
-
-        /* Split into train set and dev set, you should use train set to train your
-           neural network and dev set to evaluate its precision */
-        int dev_size = (int)(0.1 * NUM_TRAIN);
-        x_train = x.cols(0, NUM_TRAIN-dev_size-1);
-        y_train = y.cols(0, NUM_TRAIN-dev_size-1);
-        label_train = label.cols(0, NUM_TRAIN-dev_size-1);
-
-        x_dev = x.cols(NUM_TRAIN-dev_size, NUM_TRAIN - 1);
-        y_dev = y.cols(NUM_TRAIN-dev_size, NUM_TRAIN - 1);
-        label_dev = label.cols(NUM_TRAIN-dev_size, NUM_TRAIN - 1);
-
-        /* Load the test data, we will compare the prediction of your trained neural
-           network with test data label to evaluate its precision */
-        x_test = arma::zeros(IMAGE_SIZE, NUM_TEST);
-        read_mnist(FILE_TEST_IMAGES, x_test);
-    }
-
-    /* Run the sequential code if the serial flag is set */
-    NeuralNetwork seq_nn(H);
-
-    if((rank == 0) && (run_seq)) {
-        std::cout << "Start Sequential Training" << std::endl;
-
-        double start = MPI_Wtime();
-        train(seq_nn, x_train, y_train, learning_rate, reg, num_epochs, batch_size,
-              false, print_every, debug);
-        double end = MPI_Wtime();
-
-        std::cout << "Time for Sequential Training: " << end - start << " seconds" <<
-                  std::endl;
-
-        arma::rowvec label_dev_pred;
-        predict(seq_nn, x_dev, label_dev_pred);
-        double prec = precision(label_dev_pred, label_dev);
-        std::cout << "Precision on validation set for sequential training = " << prec <<
-                  std::endl;
-    }
-
-    /* Train the Neural Network in Parallel*/
-    if(rank == 0) {
-        std::cout << std::endl << "Start Parallel Training" << std::endl;
-    }
-
-    double start = MPI_Wtime();
-
-    /* ---- Parallel Training ---- */
-    parallel_train(nn, x_train, y_train, learning_rate, reg, num_epochs, batch_size,
-                   false, print_every, debug);
-
-    double end = MPI_Wtime();
-
-    if(rank == 0) {
-        std::cout << "Time for Parallel Training: " << end - start << " seconds" <<
-                  std::endl;
-    }
-
-    /* Note: Make sure after parallel training, rank 0's neural network is up to date */
-
-    /* Do predictions for the parallel NN */
-    if(rank == 0) {
-        arma::rowvec label_dev_pred;
-        predict(nn, x_dev, label_dev_pred);
-        double prec = precision(label_dev_pred, label_dev);
-        std::cout << "Precision on validation set for parallel training = " << prec <<
-                  std::endl;
-        arma::rowvec label_test_pred;
-        predict(nn, x_test, label_test_pred);
-        save_label(FILE_TEST_OUTPUT, label_test_pred);
-    }
-
-    /* If grading mode is on, compare CPU and GPU results and check for correctness */
-    if((grade || debug) && rank == 0) {
-        std::cout << std::endl << "Grading mode on. Checking for correctness" <<
-                  std::endl;
-        checkNNErrors(seq_nn, nn, "Outputs/NNErrors.txt");
+  // GEMM tests
+  if (grade == 4)
+  {
+    if (rank == 0)
+    {
+      BenchmarkGEMM();
     }
 
     MPI_Finalize();
     return 0;
+  }
+
+  // DNN learning tests
+  if (grade == 1)
+  {
+    print_every = 600;
+  }
+  else if (grade == 2)
+  {
+    print_every = 150;
+  }
+  else if (grade == 3)
+  {
+    print_every = 15;
+  }
+
+  // DNN learning tests
+  if (grade > 0)
+  {
+    debug = 1; // always run in debug mode
+    grade_tag = std::string("-" + std::to_string(grade));
+  }
+  else
+    grade_tag = std::string();
+  // grade_tag is added to the file name when saving the CPU results.
+  // It is sequal to the grading mode or is left empty if grade = 0.
+
+  H[0] = IMAGE_SIZE;
+  H[1] = num_neuron;
+  H[2] = NUM_CLASSES;
+
+  arma::Mat<nn_real> x_train, y_train, label_train;
+  arma::Mat<nn_real> x_dev, y_dev, label_dev;
+
+  arma::Mat<nn_real> x_test(IMAGE_SIZE, NUM_TEST);
+  arma::Row<nn_real> label_test = arma::zeros<arma::Row<nn_real>>(NUM_TEST);
+  arma::Mat<nn_real> y_test =
+      arma::zeros<arma::Mat<nn_real>>(NUM_CLASSES, NUM_TEST);
+
+  NeuralNetwork seq_nn(H);
+  NeuralNetwork nn(H);
+
+  if (rank == 0)
+  {
+    if (grade > 0)
+    {
+      printf("Grading mode on; grading mode   %d\n", grade);
+    }
+    else
+    {
+      printf("Grading mode off\n");
+    }
+    printf("Number of neurons           %5d\n", num_neuron);
+    printf("Number of epochs              %3d\n", num_epochs);
+    printf("Batch size                   %4d\n", batch_size);
+    printf("Regularization    %15.8g\n", reg);
+    printf("Learning rate     %15.8g\n", learning_rate);
+    if (run_seq == 1)
+    {
+      printf("The sequential code is run\n");
+    }
+    else
+    {
+      printf("The sequential code is not run\n");
+    }
+
+    if (debug == 1)
+    {
+      printf("The debug option is on\n");
+      printf("The output directory is %s\n", output_dir.c_str());
+      if (run_seq == 1)
+      {
+        printf("The CPU results are saved to %s\n", cpu_save_dir.c_str());
+      }
+      printf("The CPU results are loaded from %s\n", cpu_load_dir.c_str());
+    }
+    else
+    {
+      printf("The debug option is off\n");
+    }
+
+    // Read MNIST images into Armadillo mat vector
+    arma::Mat<nn_real> x(IMAGE_SIZE, NUM_TRAIN);
+    // label contains the prediction for each
+    arma::Row<nn_real> label = arma::zeros<arma::Row<nn_real>>(NUM_TRAIN);
+    // y is the matrix of one-hot label vectors where only y[c] = 1,
+    // where c is the right class.
+    arma::Mat<nn_real> y =
+        arma::zeros<arma::Mat<nn_real>>(NUM_CLASSES, NUM_TRAIN);
+
+    std::cout << "Loading training data" << std::endl;
+    read_mnist(file_train_images, x);
+    read_mnist_label(file_train_labels, label);
+    label_to_y(label, NUM_CLASSES, y);
+
+    /* Print stats of training data */
+    std::cout << "Training data information:" << std::endl;
+    std::cout << "Size of x_train, N =  " << x.n_cols << std::endl;
+    std::cout << "Size of label_train = " << label.size() << std::endl;
+
+    assert(x.n_cols == NUM_TRAIN && x.n_rows == IMAGE_SIZE);
+    assert(label.size() == NUM_TRAIN);
+
+    /* Split into train set and dev set, you should use train set to train your
+       neural network and dev set to evaluate its precision */
+    int dev_size = (int)(0.1 * NUM_TRAIN);
+
+    assert(dev_size > 0);
+
+    x_train = x.cols(0, NUM_TRAIN - dev_size - 1);
+    y_train = y.cols(0, NUM_TRAIN - dev_size - 1);
+    label_train = label.cols(0, NUM_TRAIN - dev_size - 1);
+
+    assert(x_train.n_cols > 0);
+    assert(x_train.n_rows == IMAGE_SIZE);
+    assert(y_train.n_cols == x_train.n_cols);
+    assert(y_train.n_rows == NUM_CLASSES);
+
+    x_dev = x.cols(NUM_TRAIN - dev_size, NUM_TRAIN - 1);
+    y_dev = y.cols(NUM_TRAIN - dev_size, NUM_TRAIN - 1);
+    label_dev = label.cols(NUM_TRAIN - dev_size, NUM_TRAIN - 1);
+
+    std::cout << "Loading testing data" << std::endl;
+    read_mnist(file_test_images, x_test);
+    read_mnist_label(file_test_labels, label_test);
+    label_to_y(label_test, NUM_CLASSES, y_test);
+  }
+
+  // For grading mode 1, 2, or 3 we need to check whether the sequential code
+  // needs to be run or not.
+  if (grade > 0 && run_seq == 0)
+  {
+    for (int i = 0; i < seq_nn.num_layers; i++)
+    {
+      std::stringstream s;
+      s << cpu_save_dir + "/seq_nn-W" << i << grade_tag << ".mat";
+      if (!file_exists(s.str()))
+      {
+        run_seq = 1;
+      }
+      std::stringstream u;
+      u << cpu_save_dir + "/seq_nn-b" << i << grade_tag << ".mat";
+      if (!file_exists(u.str()))
+      {
+        run_seq = 1;
+      }
+    }
+    if (run_seq == 1)
+    {
+      printf("Running the sequential code in order to have reference data for grading mode %d\n", grade);
+    }
+  }
+
+  /* Run the sequential code if the serial flag is set */
+  using namespace std::chrono;
+  if ((rank == 0) && (run_seq))
+  {
+    std::cout << "Start Sequential Training" << std::endl;
+
+    high_resolution_clock::time_point t1 = high_resolution_clock::now();
+    train(seq_nn, x_train, y_train, learning_rate, reg, num_epochs, batch_size,
+          false, print_every, debug);
+    high_resolution_clock::time_point t2 = high_resolution_clock::now();
+    duration<double> time_span = duration_cast<duration<double>>(t2 - t1);
+
+    std::cout << "Time for Sequential Training: " << time_span.count()
+              << " seconds" << std::endl;
+
+    // Saving data to file
+    if (grade > 0 || debug == 1)
+    {
+      for (int i = 0; i < seq_nn.num_layers; i++)
+      {
+        std::stringstream s;
+        s << cpu_save_dir + "/seq_nn-W" << i << grade_tag << ".mat";
+        printf("Saving W%1d CPU data to file %s\n", i, s.str().c_str());
+        save_cpu_data_test(seq_nn.W[i], s);
+        std::stringstream u;
+        u << cpu_save_dir + "/seq_nn-b" << i << grade_tag << ".mat";
+        printf("Saving b%1d CPU data to file %s\n", i, u.str().c_str());
+        save_cpu_data_test(seq_nn.b[i], u);
+      }
+    }
+
+    {
+      arma::Row<nn_real> label_pred;
+      predict(seq_nn, x_dev, label_pred);
+      nn_real prec = precision(label_pred, label_dev);
+      printf("Precision on validation set for sequential training = %20.16f\n", prec);
+    }
+
+    {
+      arma::Row<nn_real> label_pred;
+      predict(seq_nn, x_test, label_pred);
+      nn_real prec = precision(label_pred, label_test);
+      printf("Precision on testing set for sequential training = %20.16f\n", prec);
+    }
+  }
+
+  /* Train the neural network in parallel*/
+  if (rank == 0)
+    std::cout << std::endl
+              << "Start Parallel Training" << std::endl;
+
+  std::ofstream error_file;
+  if (debug)
+  {
+    string error_filename = output_dir + "/CpuGpuDiff" + mpi_tag + grade_tag + ".txt";
+    error_file.open(error_filename);
+    if (!error_file.good())
+    {
+      std::cerr << "Unable to open the file " << error_filename << std::endl;
+      std::cerr << "Make sure the directory " << output_dir << " exists" << std::endl;
+      exit(1);
+    }
+
+    if (rank == 0)
+      printf("The error in the GPU calculation during training is saved to %s\n", error_filename.c_str());
+  }
+
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  high_resolution_clock::time_point t1 = high_resolution_clock::now();
+
+  /* ---- Parallel Training ---- */
+  if (rank == 0)
+  {
+    assert(x_train.n_cols > 0);
+    assert(x_train.n_rows == IMAGE_SIZE);
+    assert(y_train.n_cols == x_train.n_cols);
+    assert(y_train.n_rows == NUM_CLASSES);
+    assert(nn.H[0] == IMAGE_SIZE);
+    assert(nn.H[2] == NUM_CLASSES);
+  }
+
+  parallel_train(nn, x_train, y_train, learning_rate, error_file, reg,
+                 num_epochs, batch_size, print_every, debug);
+
+  high_resolution_clock::time_point t2 = high_resolution_clock::now();
+  duration<double> time_span = duration_cast<duration<double>>(t2 - t1);
+
+  error_file.close();
+
+  if (rank == 0)
+    std::cout << "Time for Parallel Training: " << time_span.count()
+              << " seconds" << std::endl;
+
+  /* Note: Make sure after parallel training, rank 0's neural network is up to
+   * date */
+
+  /* Run predictions for the parallel NN */
+  if (rank == 0)
+  {
+    {
+      arma::Row<nn_real> label_pred;
+      predict(nn, x_dev, label_pred);
+      nn_real prec = precision(label_pred, label_dev);
+      printf("Precision on validation set for parallel training = %20.16f\n", prec);
+    }
+
+    {
+      arma::Row<nn_real> label_pred;
+      predict(nn, x_test, label_pred);
+      nn_real prec = precision(label_pred, label_test);
+      printf("Precision on testing set for parallel training = %20.16f\n", prec);
+    }
+  }
+
+  /* If grading mode is on, compare CPU and GPU results and check for
+   * correctness */
+  if (rank == 0 && (grade > 0 || debug == 1))
+  {
+    std::cout << std::endl
+              << "Checking for correctness..."
+              << std::endl;
+    // Reading data from file
+    for (int i = 0; i < seq_nn.num_layers; i++)
+    {
+      std::stringstream s;
+      s << cpu_load_dir + "/seq_nn-W" << i << grade_tag << ".mat";
+      printf("Loading from file %s\n", s.str().c_str());
+      load_cpu_data_test(seq_nn.W[i], s);
+      std::stringstream u;
+      u << cpu_load_dir + "/seq_nn-b" << i << grade_tag << ".mat";
+      printf("Loading from file %s\n", u.str().c_str());
+      load_cpu_data_test(seq_nn.b[i], u);
+    }
+    {
+      string error_filename = output_dir + "/NNErrors" + mpi_tag + grade_tag + ".txt";
+      printf("\nThe error in the GPU DNN at the completion of training is saved to %s\n", error_filename.c_str());
+    }
+    checkNNErrors(seq_nn, nn,
+                  output_dir + "/NNErrors" + mpi_tag + grade_tag + ".txt");
+  }
+
+  MPI_Finalize();
+  return 0;
 }
