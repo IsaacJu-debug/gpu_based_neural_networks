@@ -337,15 +337,59 @@ void allocateAndCopyToGPU_MPI(gpu_nn &device_nn, gpu_cache &device_cache, gpu_gr
 
 void feedforward_device(gpu_nn &device_nn, gpu_cache &device_cache, NeuralNetwork &nn, int mini_batch_size)
 {
+  // z(1) = W(1) * Xbatch + b(1)
+  myABCD_GEMM(device_nn.W1_d, device_cache.X_d, device_nn.b1_d, device_cache.z1_d, 1, 1, nn.H[1], mini_batch_size, nn.H[0]);
 
+  // a(1) = sigmoid(z(1))
+  my_sigmoid(device_cache.z1_d, device_cache.a1_d, nn.H[1] * mini_batch_size);
+
+  // z(2) = W(2) * a(1) + b(2)
+  myABCD_GEMM(device_nn.W2_d, device_cache.a1_d, device_nn.b2_d, device_cache.z2_d, 1, 1, nn.H[2], mini_batch_size, nn.H[1]);
+
+  // yc = a(2) = sigmoid(z(2))
+  my_softmax(device_cache.z2_d, device_cache.yc_d, mini_batch_size, nn.H[2]);
 
 }
 
 void backprop_device(gpu_nn &device_nn, nn_real reg, gpu_cache &device_cache, gpu_grads &device_grads, int mini_batch_size, int N)
 {
+  // diff = 1 / N * (yc - y)
+  matrixAdd(device_cache.yc_d, device_cache.y_d, device_cache.diff_y_d, 1.0 / N, - 1.0 / N, nn.H[2], mini_batch_size);
 
+  // dW2 = (yc - y) * a(1)^T + reg * W(2)
+  myABtCD_GEMM(device_cache.diff_y_d, device_cache.a1_d, device_nn.W2_d, device_grads.dW2_d, 1, reg, nn.H[2], nn.H[1], mini_batch_size);
+
+  // db2 = sum(yc - y) over the batch_size
+  my_reduce_A(device_cache.diff_y_d, device_grads.db2_d, nn.H[2], mini_batch_size);
+
+  // da1 = W(2)^T * (yc - y)
+  myAtBCD_GEMM(device_nn.W2_d, device_cache.diff_y_d, device_grads.da1_d, device_grads.da1_d, 1, 0, nn.H[1], mini_batch_size, nn.H[2]);
+
+  // dz1 = da1 % a1 % (1 - a1)
+  myABCD_elementwise(device_grads.da1_d, device_cache.a1_d, device_cache.a1_d, device_grads.dz1_d, 1, nn.H[1], mini_batch_size);
+
+  // dW1 = dz1 * X_batch^T + reg * W(1)
+  myABtCD_GEMM(device_grads.dz1_d, device_cache.X_d, device_nn.W1_d, device_grads.dW1_d, 1, reg, nn.H[1], nn.H[0], mini_batch_size);
+
+  // db1 = sum(dz1) over the batch_size
+  my_reduce_A(device_grads.dz1_d, device_grads.db1_d, nn.H[1], mini_batch_size);
 }
 
+void gradient_descent_device(gpu_nn &device_nn, gpu_grads &device_grads, nn_real learning_rate, 
+                        NeuralNetwork &nn)
+{
+  // update W1 = W1 - learning_rate * dW1
+  matrixAdd(device_nn.W1_d, device_grads.dW1_d, device_nn.W1_d, 1, -learning_rate, nn.H[1], nn.H[0]);
+
+  // update W2 = W2 - learning_rate * dW2
+  matrixAdd(device_nn.W2_d, device_grads.dW2_d, device_nn.W2_d, 1, -learning_rate, nn.H[2], nn.H[1]);
+
+  // update b1 = b1 - learning_rate * db1
+  matrixAdd(device_nn.b1_d, device_grads.db1_d, device_nn.b1_d, 1, -learning_rate, nn.H[1], 1);
+
+  // update b2 = b2 - learning_rate * db2
+  matrixAdd(device_nn.b2_d, device_grads.db2_d, device_nn.b2_d, 1, -learning_rate, nn.H[2], 1);
+}
 /*
  * Train the neural network &nn of rank 0 in parallel. Your MPI implementation
  * should mainly be in this function.

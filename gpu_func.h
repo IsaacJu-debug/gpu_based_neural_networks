@@ -13,15 +13,33 @@ int myGEMM(nn_real *A, nn_real *B, nn_real *C, nn_real alpha, nn_real beta,
 
 // TODO
 // Add additional function declarations
-
+// kernel functions
+// sigmoid function
 __global__ void sigmoid_device(const nn_real * z, nn_real * a, int array_length);
 
+// softmax function
 __global__ void softmax_device(const nn_real * z, nn_real * a, int batch_size, int output_size);
 
+// GEMM
 __global__ void kernelGEMM(const nn_real *A, const nn_real *B, nn_real *C, nn_real alpha, nn_real beta, int M, int N, int K);
 
+// 
+__global__ void matrixAdd_device(const nn_real *A, const nn_real *B, nn_real *C, nn_real alpha, nn_real beta,
+                        int M, int N); 
 
+__global__ void ABCD_GEMM(const nn_real *A, const nn_real *B, const nn_real *c, nn_real *D, nn_real alpha, nn_real beta,
+                        int M, int N, int K);
 
+__global__ void ABtCD_GEMM(const nn_real *A, const nn_real *B, const nn_real *C, nn_real *D, nn_real alpha, nn_real beta,
+                        int M, int N, int K); 
+
+__global__ void AtBCD_GEMM(const nn_real *A, const nn_real *B, const nn_real *C, nn_real *D, nn_real alpha, nn_real beta,
+                        int M, int N, int K); 
+
+__global__ void ABCD_elementwise(const nn_real *A, const nn_real *B, const nn_real *C, nn_real *D, nn_real alpha,
+                        int M, int N); 
+
+__global__ void reduce_A(const nn_real *A, nn_real *B, int M, int N);
 // struct for hosting nn parameters, gradients, and other variables
 struct gpu_nn
 {
@@ -80,6 +98,25 @@ struct cpu_cache
 
 };
 
+// the function declarations for invoking GPU kernels
+int myGEMM(nn_real *A, nn_real *B, nn_real *C, nn_real alpha, nn_real beta, int M, int N, int K);
+
+int myABCD_GEMM(nn_real *A, nn_real *B, nn_real *C, nn_real *D, nn_real alpha, nn_real beta, int M, int N, int K);
+
+int myABtCD_GEMM(nn_real *A, nn_real *B, nn_real *C, nn_real *D, nn_real alpha, nn_real beta, int M, int N, int K);
+
+int myAtBCD_GEMM(nn_real *A, nn_real *B, nn_real *C, nn_real *D, nn_real alpha, nn_real beta, int M, int N, int K);
+
+int myABCD_elementwise(nn_real *A, nn_real *B, nn_real *C, nn_real *D, nn_real alpha, int M, int N);
+
+void my_sigmoid(const nn_real *z, nn_real *a, int array_length);
+
+void my_softmax(const nn_real *z, nn_real *a, int batch_size, int output_size);
+
+void matrixAdd(const nn_real *A, const nn_real *B, nn_real *C, nn_real alpha, nn_real beta,
+                        int M, int N); 
+
+void my_reduce_A(const nn_real *A, nn_real *B, int M, int N);  
 
 
 #endif
