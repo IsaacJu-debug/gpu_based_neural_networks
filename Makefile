@@ -22,14 +22,22 @@ OBJS := $(CPPOBJS) $(CUDOBJS) $(UTLOBJS)
 DEPFILES := $(OBJS:$(OBJDIR)/%.o=$(DEPDIR)/%.d)
 
 # Flags
+# Armadillo include path
+ARMADILLO_INC_PATH=/usr/workspace/ju1/03_CS_foundation_repos/01_CME/TPL/armadillo-12.6.7/include
+CUDA_INC_PATH=/usr/tce/packages/cuda/cuda-10.1.168/include
+# Flags
 CFLAGS=-O2 -DARMA_USE_BLAS -DARMA_USE_LAPACK -DARMA_DONT_USE_WRAPPER
-CUDFLAGS=-lineinfo -O2 -c -arch=compute_75 -code=sm_75 -Xcompiler -Wall
-INCFLAGS=-I$(CUDA_INC)
+CUDFLAGS=-lineinfo -O2 -c -arch=compute_70 -code=sm_70 -Xcompiler -Wall
+
+# Include flags (adding Armadillo include path)
+INCFLAGS=-I$(CUDA_INC) -I$(ARMADILLO_INC_PATH) -I$(CUDA_INC_PATH)
 
 # LDFLAGS=-lblas -llapack -lcublas -lcudart
 
-LIB_PATH=/usr/lib/x86_64-linux-gnu/openblas-pthread
-LDFLAGS=-Wl,-Bstatic $(LIB_PATH)/libblas.a $(LIB_PATH)/liblapack.a -Wl,-Bdynamic -lgfortran -lcublas -lcudart
+LIB_PATH=/usr/lib64
+# Define the Armadillo library path
+ARMADILLO_LIB_PATH=/usr/workspace/ju1/03_CS_foundation_repos/01_CME/TPL/armadillo-12.6.7/lib64
+LDFLAGS=-Wl,-Bstatic $(LIB_PATH)/libblas.a $(LIB_PATH)/liblapack.a -Wl,-Bdynamic -lgfortran -lcublas -lcudart -L$(ARMADILLO_LIB_PATH) -larmadillo
 
 DEPFLAGS=-MT $@ -MMD -MF $(addprefix $(DEPDIR)/, $(notdir $*)).d
 
@@ -54,7 +62,7 @@ $(UTLOBJS): $(OBJDIR)/%.o: utils/%.cpp $(DEPDIR)/%.d
 $(CUDOBJS): $(OBJDIR)/%.o: %.cu $(DEPDIR)/%.d
 	@mkdir -p $(OBJDIR)
 	@mkdir -p $(DEPDIR)
-	$(CU_CMD) -c $< -o $@ $(DEPFLAGS)
+	$(CU_CMD) -c $< -o $@
 
 $(DEPFILES):
 include $(wildcard $(DEPFILES))
